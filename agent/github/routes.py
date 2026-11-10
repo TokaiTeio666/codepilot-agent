@@ -1,24 +1,77 @@
 """Github webhook HTTP routes."""
 
+from collections.abc import Awaitable, Callable
+from typing import cast
+
 from fastapi import APIRouter, Response
 
 from agent.expedited_review.watch import WATCHED_GITHUB_EVENTS as EXPEDITED_REVIEW_EVENTS
 from agent.github import webhook as service
+from agent.github.ingress import service as ingress
+from agent.github.ingress.models import HandlerKey
+from agent.github.ingress.queue import IngressUnavailable
 from agent.schedules import store as schedules
+from agent.utils.json_types import JsonObject
 from agent.webhooks import common
 from agent.workspaces.routing import WorkspaceLookupError, repo_is_routable
 
 router = APIRouter()
 
+_QUEUED_RESPONSE: dict[str, str] = {"status": "accepted", "message": "Queued for processing"}
+_DUPLICATE_RESPONSE: dict[str, str] = {
+    "status": "ignored",
+    "reason": "duplicate delivery",
+}
 
-async def _launch_issue_automations(payload: dict[str, object], delivery_id: str) -> None:
+
+async def _launch_issue_automations(payload: JsonObject, delivery_id: str) -> None:
     try:
         await schedules.launch_github_issue_automations(payload, delivery_id)
-    except Exception:
+    except Exception:  # noqa: BLE001
         common.logger.exception(
             "Failed to launch GitHub issue automations",
             extra={"github_delivery": delivery_id},
         )
+
+
+async def _schedule(
+    background_tasks: common.BackgroundTasks,
+    handler: HandlerKey,
+    function: Callable[..., Awaitable[object]],
+    *args: object,
+    payload: JsonObject,
+    event_type: str,
+    delivery_id: str,
+) -> dict[str, str] | None:
+    """Queue a verified delivery, or run it inline when the queue is disabled.
+
+    Returns the HTTP response the queue already settled, or None when the
+    caller should keep its existing in-process behavior.
+    """
+    try:
+        outcome = await ingress.submit(
+            handler,
+            event_type=event_type,
+            delivery_id=delivery_id,
+            payload=payload,
+        )
+    except IngressUnavailable:
+        # A 5xx is the only answer GitHub retries, and dropping this delivery
+        # would drop real work.
+        common.logger.error(
+            "GitHub ingress queue unavailable; asking GitHub to retry",
+            extra={"github_delivery": delivery_id, "github_handler": handler},
+            exc_info=True,
+        )
+        raise common.HTTPException(
+            status_code=503, detail="GitHub ingress queue unavailable"
+        ) from None
+    if outcome == "duplicate":
+        return _DUPLICATE_RESPONSE
+    if outcome == "queued":
+        return _QUEUED_RESPONSE
+    background_tasks.add_task(function, *args)
+    return None
 
 
 @router.post("/webhooks/github")
@@ -49,14 +102,17 @@ async def github_webhook(
         return {"status": "ignored", "reason": f"Unsupported event type: {event_type}"}
 
     try:
-        payload = common.json.loads(body)
+        parsed = common.json.loads(body)
     except common.json.JSONDecodeError:
         common.logger.exception("Failed to parse GitHub webhook JSON")
         return {"status": "error", "message": "Invalid JSON"}
+    if not isinstance(parsed, dict):
+        return {"status": "error", "message": "Invalid JSON"}
+    payload = cast(JsonObject, parsed)
 
-    webhook_repo = payload.get("repository", {})
+    webhook_repo = cast(JsonObject, payload.get("repository") or {})
     webhook_repo_config = {
-        "owner": webhook_repo.get("owner", {}).get("login", ""),
+        "owner": cast(JsonObject, webhook_repo.get("owner") or {}).get("login", ""),
         "name": webhook_repo.get("name", ""),
     }
 
@@ -64,7 +120,8 @@ async def github_webhook(
         repository = f"{webhook_repo_config['owner']}/{webhook_repo_config['name']}"
         try:
             routable = await repo_is_routable(
-                webhook_repo_config["owner"], webhook_repo_config["name"]
+                cast(str, webhook_repo_config["owner"]),
+                cast(str, webhook_repo_config["name"]),
             )
         except WorkspaceLookupError:
             # Ownership is unknown, so dropping the delivery may drop real work.
@@ -87,9 +144,20 @@ async def github_webhook(
     # behind both gates they answer to: the repository must belong to a
     # workspace and be allowlisted.
     if event_type in EXPEDITED_REVIEW_EVENTS and common.is_repo_allowed(webhook_repo_config):
-        background_tasks.add_task(service.process_expedited_review_event, payload, event_type)
+        scheduled = await _schedule(
+            background_tasks,
+            "github_expedited_review",
+            service.process_expedited_review_event,
+            payload,
+            event_type,
+            payload=payload,
+            event_type=event_type,
+            delivery_id=delivery_id,
+        )
+        if scheduled is not None and scheduled is _DUPLICATE_RESPONSE:
+            return scheduled
 
-    issue = payload.get("issue", {})
+    issue = cast(JsonObject, payload.get("issue") or {})
     is_pull_request_comment = bool(event_type == "issue_comment" and issue.get("pull_request"))
     is_issue_comment = bool(event_type == "issue_comment" and not issue.get("pull_request"))
     is_issue_event = event_type == "issues"
@@ -113,7 +181,17 @@ async def github_webhook(
             common.logger.info(
                 "Accepted GitHub PR %s webhook, scheduling reviewer watch update", action
             )
-            background_tasks.add_task(service.process_github_pr_close, payload)
+            scheduled = await _schedule(
+                background_tasks,
+                "github_pr_close",
+                service.process_github_pr_close,
+                payload,
+                payload=payload,
+                event_type=event_type,
+                delivery_id=delivery_id,
+            )
+            if scheduled is not None:
+                return scheduled
             return {"status": "accepted", "message": f"Processing PR {action} for reviewer watch"}
         if action in common.GH_PR_FIRST_REVIEW_ACTIONS:
             if not await common.is_repo_auto_review_enabled(webhook_repo_config):
@@ -122,7 +200,17 @@ async def github_webhook(
             if gate_rejection is not None:
                 return gate_rejection
             common.logger.info("Accepted GitHub PR %s webhook, scheduling auto-review task", action)
-            background_tasks.add_task(service.process_github_pr_ready, payload)
+            scheduled = await _schedule(
+                background_tasks,
+                "github_pr_ready",
+                service.process_github_pr_ready,
+                payload,
+                payload=payload,
+                event_type=event_type,
+                delivery_id=delivery_id,
+            )
+            if scheduled is not None:
+                return scheduled
             return {"status": "accepted", "message": f"Processing PR {action} for auto-review"}
         if action in common.GH_PR_AGENT_STATE_ACTIONS:
             return {"status": "accepted", "message": f"Processing PR {action} state"}
@@ -136,7 +224,17 @@ async def github_webhook(
         if not await common.is_repo_auto_review_enabled(webhook_repo_config):
             return {"status": "ignored", "reason": "Automatic review disabled for repository"}
         common.logger.info("Accepted GitHub push webhook, scheduling reviewer watch evaluation")
-        background_tasks.add_task(service.process_github_push_event, payload)
+        scheduled = await _schedule(
+            background_tasks,
+            "github_push",
+            service.process_github_push_event,
+            payload,
+            payload=payload,
+            event_type=event_type,
+            delivery_id=delivery_id,
+        )
+        if scheduled is not None:
+            return scheduled
         return {"status": "accepted", "message": "Processing GitHub push for reviewer watch"}
 
     if not common.is_repo_allowed(webhook_repo_config):
@@ -148,12 +246,19 @@ async def github_webhook(
         return {"status": "ignored", "reason": "Repository not in allowlist"}
 
     if event_type in common.GITHUB_CI_EVENTS:
-        background_tasks.add_task(
+        scheduled = await _schedule(
+            background_tasks,
+            "github_ci",
             service.process_github_ci_event,
             payload,
             event_type,
             delivery_id,
+            payload=payload,
+            event_type=event_type,
+            delivery_id=delivery_id,
         )
+        if scheduled is not None:
+            return scheduled
         return {"status": "accepted", "message": "Processing GitHub CI event"}
 
     if is_issue_event:
@@ -167,7 +272,18 @@ async def github_webhook(
                 common.logger.info("Ignoring GitHub issue edit without title/body changes")
                 return {"status": "ignored", "reason": "Issue edit did not change title or body"}
         if action == "opened":
-            background_tasks.add_task(_launch_issue_automations, payload, delivery_id)
+            scheduled = await _schedule(
+                background_tasks,
+                "github_issue_automations",
+                _launch_issue_automations,
+                payload,
+                delivery_id,
+                payload=payload,
+                event_type=event_type,
+                delivery_id=delivery_id,
+            )
+            if scheduled is not None and scheduled is _DUPLICATE_RESPONSE:
+                return scheduled
 
         issue_text = f"{issue.get('title', '')}\n\n{issue.get('body', '')}"
         if not common.mentions_open_swe(issue_text):
@@ -179,8 +295,19 @@ async def github_webhook(
         if gate_rejection is not None:
             return gate_rejection
 
+        scheduled = await _schedule(
+            background_tasks,
+            "github_issue",
+            service.process_github_issue,
+            payload,
+            event_type,
+            payload=payload,
+            event_type=event_type,
+            delivery_id=delivery_id,
+        )
+        if scheduled is not None:
+            return scheduled
         common.logger.info("Accepted GitHub issue webhook, scheduling background task")
-        background_tasks.add_task(service.process_github_issue, payload, event_type)
         return {"status": "accepted", "message": "Processing GitHub issue event"}
 
     action = payload.get("action", "")
@@ -192,8 +319,8 @@ async def github_webhook(
         common.logger.debug("Ignoring unsupported GitHub %s action: %s", event_type, action)
         return {"status": "ignored", "reason": f"Unsupported GitHub {event_type} action: {action}"}
 
-    comment = payload.get("comment") or payload.get("review", {})
-    comment_body = (comment.get("body") or "") if comment else ""
+    comment = payload.get("comment") or payload.get("review") or {}
+    comment_body = (comment.get("body") or "") if isinstance(comment, dict) else ""
 
     if (
         event_type == "pull_request_review_comment"
@@ -202,7 +329,17 @@ async def github_webhook(
         gate_rejection = await common.enforce_public_repo_org_gate(payload, event_type)
         if gate_rejection is not None:
             return gate_rejection
-        background_tasks.add_task(service.process_github_review_finding_reply, payload)
+        scheduled = await _schedule(
+            background_tasks,
+            "github_review_finding_reply",
+            service.process_github_review_finding_reply,
+            payload,
+            payload=payload,
+            event_type=event_type,
+            delivery_id=delivery_id,
+        )
+        if scheduled is not None:
+            return scheduled
         return {"status": "accepted", "message": "Processing review finding reply"}
 
     if not common.mentions_open_swe(comment_body):
@@ -224,11 +361,33 @@ async def github_webhook(
         "pull_request_review_comment",
         "pull_request_review",
     }:
-        background_tasks.add_task(service.process_github_pr_comment, payload, event_type)
+        scheduled = await _schedule(
+            background_tasks,
+            "github_pr_comment",
+            service.process_github_pr_comment,
+            payload,
+            event_type,
+            payload=payload,
+            event_type=event_type,
+            delivery_id=delivery_id,
+        )
+        if scheduled is not None:
+            return scheduled
         return {"status": "accepted", "message": f"Processing {event_type} event"}
 
     if is_issue_comment:
-        background_tasks.add_task(service.process_github_issue, payload, event_type)
+        scheduled = await _schedule(
+            background_tasks,
+            "github_issue",
+            service.process_github_issue,
+            payload,
+            event_type,
+            payload=payload,
+            event_type=event_type,
+            delivery_id=delivery_id,
+        )
+        if scheduled is not None:
+            return scheduled
         return {"status": "accepted", "message": "Processing GitHub issue comment event"}
 
     common.logger.info("Ignoring unsupported GitHub payload shape for event=%s", event_type)

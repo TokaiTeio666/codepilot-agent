@@ -29,6 +29,19 @@ It goes beyond code generation. Open SWE can review pull requests, learn a repos
 > [!NOTE]
 > Open SWE is under active development. APIs, setup, and product surfaces may continue to evolve.
 
+### GitHub ingress queue (this fork)
+
+This fork makes the GitHub path durable and observable end to end. A verified
+delivery can be put on a Redis Stream instead of running inside the web
+request: the delivery id is deduplicated per handler, a consumer group runs the
+handler under a global concurrency ceiling, failures retry with exponential
+backoff and jitter, and exhausted deliveries land in a dead stream. The queue is
+opt-in and off by default, so the upstream in-process behavior is unchanged.
+
+Read [docs/GITHUB_PIPELINE.md](docs/GITHUB_PIPELINE.md) for the full trace from
+HMAC verification to PR writeback, including the failure matrix and the
+operational Redis keys.
+
 ---
 
 ## The software factory loop

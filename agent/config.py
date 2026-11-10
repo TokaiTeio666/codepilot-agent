@@ -236,6 +236,71 @@ ENV.var(
 ENV.var("GITHUB_APP_INSTALLATION_ID", "GitHub App installation used when a run names none.")
 ENV.var("GITHUB_WEBHOOK_SECRET", "HMAC secret for GitHub webhook deliveries.", secret=True)
 ENV.var(
+    "GITHUB_INGRESS_QUEUE_ENABLED",
+    "Put verified GitHub deliveries on the Redis Stream ingress queue instead of running the "
+    "handler in the web process.",
+)
+ENV.var(
+    "GITHUB_INGRESS_WORKER_ENABLED",
+    "Run GitHub ingress queue consumers inside this process. Leave off when a dedicated worker "
+    "process consumes the same stream.",
+)
+ENV.var(
+    "GITHUB_INGRESS_REDIS_URL",
+    "Redis URL for the GitHub ingress stream, delivery ledger and concurrency slots.",
+    default="redis://localhost:6379/0",
+)
+ENV.var(
+    "GITHUB_INGRESS_STREAM",
+    "Redis Stream holding pending GitHub deliveries.",
+    default="github:ingress:stream",
+)
+ENV.var(
+    "GITHUB_INGRESS_GROUP",
+    "Redis consumer group for the GitHub ingress stream.",
+    default="github-ingress",
+)
+ENV.var(
+    "GITHUB_INGRESS_CONCURRENCY",
+    "Global ceiling on concurrently executing GitHub ingress handlers.",
+    default="20",
+)
+ENV.var(
+    "GITHUB_INGRESS_WORKER_COUNT",
+    "Number of consumer loops this process starts when the ingress worker is enabled.",
+    default="2",
+)
+ENV.var(
+    "GITHUB_INGRESS_LOCAL_CONCURRENCY",
+    "Concurrent handlers per consumer loop; worker_count times this is the local ceiling.",
+    default="10",
+)
+ENV.var(
+    "GITHUB_INGRESS_MAX_ATTEMPTS",
+    "Handler attempts before a delivery is dead-lettered.",
+    default="3",
+)
+ENV.var(
+    "GITHUB_INGRESS_RETRY_BASE_SECONDS",
+    "First retry delay; later attempts double it.",
+    default="30",
+)
+ENV.var(
+    "GITHUB_INGRESS_RETRY_MAX_SECONDS",
+    "Cap on the exponential retry delay.",
+    default="600",
+)
+ENV.var(
+    "GITHUB_INGRESS_HANDLER_TIMEOUT_SECONDS",
+    "Deadline for one handler attempt before it counts as failed.",
+    default="600",
+)
+ENV.var(
+    "GITHUB_INGRESS_DELIVERY_TTL_SECONDS",
+    "How long a processed X-GitHub-Delivery id stays deduplicated.",
+    default="86400",
+)
+ENV.var(
     "GITHUB_OAUTH_PROVIDER_ID", "LangSmith OAuth provider id for the legacy brokered GitHub auth."
 )
 ENV.var(
