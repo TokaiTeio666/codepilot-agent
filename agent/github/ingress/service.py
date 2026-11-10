@@ -135,10 +135,3 @@ async def stop_worker() -> None:
     for client in _CLIENTS.values():
         await client.aclose()
     _CLIENTS.clear()
-
-
-def reset_for_tests() -> None:
-    """Forget process-wide state between tests."""
-    _WORKERS.clear()
-    _CLIENTS.clear()
-    _STOP.set()
