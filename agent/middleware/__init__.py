@@ -4,6 +4,8 @@ from typing import TYPE_CHECKING, Any
 
 _MIDDLEWARE_MODULES = {
     "check_message_queue_before_model": ".check_message_queue",
+    "DangerousCommandApprovalMiddleware": ".dangerous_commands",
+    "approval_mode": ".dangerous_commands",
     "DynamicToolMiddleware": ".dynamic_tools",
     "IntegrationGroup": ".dynamic_tools",
     "ExcludeToolsMiddleware": ".exclude_tools",
@@ -36,6 +38,7 @@ _MIDDLEWARE_MODULES = {
 }
 
 __all__ = [
+    "DangerousCommandApprovalMiddleware",
     "DynamicToolMiddleware",
     "ExcludeToolsMiddleware",
     "IntegrationGroup",
@@ -59,6 +62,7 @@ __all__ = [
     "ValidateImageReadsMiddleware",
     "WorkflowPushGuardMiddleware",
     "WorkspaceSkillsMiddleware",
+    "approval_mode",
     "check_message_queue_before_model",
     "notify_step_limit_reached",
     "record_run_usage",
@@ -70,6 +74,10 @@ __all__ = [
 
 if TYPE_CHECKING:
     from agent.middleware.check_message_queue import check_message_queue_before_model
+    from agent.middleware.dangerous_commands import (
+        DangerousCommandApprovalMiddleware,
+        approval_mode,
+    )
     from agent.middleware.dynamic_tools import DynamicToolMiddleware, IntegrationGroup
     from agent.middleware.exclude_tools import ExcludeToolsMiddleware
     from agent.middleware.model_call_timeout import ModelCallTimeoutMiddleware

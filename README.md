@@ -42,6 +42,20 @@ Read [docs/GITHUB_PIPELINE.md](docs/GITHUB_PIPELINE.md) for the full trace from
 HMAC verification to PR writeback, including the failure matrix and the
 operational Redis keys.
 
+### Agent loop hardening (this fork)
+
+- **Patch-based writes**: `apply_patch` applies a strict unified diff in the
+  sandbox and writes nothing unless every hunk matches.
+- **Human-in-the-loop commands**: `rm`, force-push, `git reset --hard` and other
+  destructive commands can interrupt the run for approval and resume from the
+  checkpoint.
+- **Model-route escalation**: two consecutive tool failures, or a long run of
+  steps without a write, move the run from the cheap route to the performance
+  model.
+
+Read [docs/AGENT_TOOLING.md](docs/AGENT_TOOLING.md) for the approval contract,
+the gated command list, and the escalation thresholds.
+
 ---
 
 ## The software factory loop

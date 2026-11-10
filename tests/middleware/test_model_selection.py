@@ -3,9 +3,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from langchain.agents.middleware.types import ModelRequest, ModelResponse
-from langchain_core.messages import HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from agent.middleware.model_selection import ModelSelectionMiddleware, RouteDecision
+from agent.middleware.model_selection import (
+    ModelSelectionMiddleware,
+    RouteDecision,
+    escalation_reason,
+)
 
 
 def _middleware(
@@ -189,6 +193,93 @@ async def test_mid_run_plan_mode_temporarily_overrides_existing_route() -> None:
 
     state["plan_mode"] = False
     assert (await _invoke(middleware, state)).model is models["fast"]
+
+
+def _failed(message_id: str) -> ToolMessage:
+    return ToolMessage(content="boom", tool_call_id=message_id, status="error")
+
+
+def _ok(message_id: str) -> ToolMessage:
+    return ToolMessage(content="ok", tool_call_id=message_id)
+
+
+def _tool_turn(*names: str) -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[
+            {"name": name, "args": {}, "id": f"call-{index}-{name}"}
+            for index, name in enumerate(names)
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_repeated_tool_failures_escalate_the_route() -> None:
+    middleware, models, _ = _middleware()
+    state = {
+        "messages": [
+            HumanMessage(content="Fix the failing test"),
+            _tool_turn("execute"),
+            _failed("1"),
+            _tool_turn("execute"),
+            _failed("2"),
+        ]
+    }
+
+    state.update(await middleware.abefore_model(cast(Any, state), MagicMock()))
+
+    assert state["model_route"] == "performance"
+    assert state["model_route_escalated"] is True
+    assert (await _invoke(middleware, state)).model is models["performance"]
+
+
+@pytest.mark.asyncio
+async def test_a_single_failure_keeps_the_cheap_route() -> None:
+    middleware, models, _ = _middleware()
+    state = {
+        "messages": [
+            HumanMessage(content="Fix the failing test"),
+            _tool_turn("execute"),
+            _failed("1"),
+        ]
+    }
+
+    state.update(await middleware.abefore_model(cast(Any, state), MagicMock()))
+
+    assert state["model_route"] == "fast"
+    assert state["model_route_escalated"] is False
+    assert (await _invoke(middleware, state)).model is models["fast"]
+
+
+def test_escalation_reason_is_none_after_a_successful_tool_result() -> None:
+    messages = [
+        HumanMessage(content="Fix the failing test"),
+        _tool_turn("execute"),
+        _ok("1"),
+        _tool_turn("execute"),
+        _failed("2"),
+    ]
+
+    assert escalation_reason(messages) is None
+
+
+def test_long_runs_without_an_edit_escalate() -> None:
+    messages = [
+        HumanMessage(content="Find the bug"),
+        *(_tool_turn("read_file") for _ in range(15)),
+    ]
+
+    assert escalation_reason(messages) == "steps_without_edit"
+
+
+def test_long_runs_that_edit_do_not_escalate() -> None:
+    messages = [
+        HumanMessage(content="Fix the bug"),
+        *(_tool_turn("read_file") for _ in range(15)),
+        _tool_turn("apply_patch"),
+    ]
+
+    assert escalation_reason(messages) is None
 
 
 @pytest.mark.asyncio

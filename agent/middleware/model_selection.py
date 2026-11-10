@@ -1,10 +1,11 @@
+import json
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, Literal, NotRequired
 
 from langchain.agents.middleware.types import AgentState, ModelRequest, ModelResponse
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.config import get_stream_writer
 from langgraph.runtime import Runtime
 from pydantic import BaseModel
@@ -21,6 +22,13 @@ RoutingMode = Literal["auto", "performance"]
 
 _CLASSIFIER_PROMPT = load_prompt("model-selection.md")
 _PLAN_APPROVED_PREFIX = "Plan mode is now inactive because the plan was approved."
+
+# Escalation is the escape hatch for a route that guessed too cheap. Two
+# consecutive tool failures, or a long run of steps with no file write, means
+# the cheap model is not converging.
+_ESCALATION_FAILURES = 2
+_ESCALATION_STEPS = 15
+_EDIT_TOOL_NAMES = frozenset({"apply_patch", "edit_file", "write_file"})
 
 
 def _latest_human_task(messages: Sequence[Any]) -> str:
@@ -47,6 +55,70 @@ def _latest_human_task(messages: Sequence[Any]) -> str:
     return plain
 
 
+def _tool_message_failed(message: ToolMessage) -> bool:
+    if message.status == "error":
+        return True
+    content = message.content
+    if isinstance(content, Mapping):
+        return content.get("status") == "error" or content.get("success") is False
+    if isinstance(content, str):
+        try:
+            parsed = json.loads(content)
+        except (json.JSONDecodeError, ValueError):
+            return False
+        return isinstance(parsed, Mapping) and (
+            parsed.get("status") == "error" or parsed.get("success") is False
+        )
+    return False
+
+
+def _consecutive_tool_failures(messages: Sequence[Any]) -> int:
+    """Failed tool results at the end of this human turn, newest first."""
+    failures = 0
+    for message in reversed(messages):
+        if isinstance(message, HumanMessage):
+            break
+        if not isinstance(message, ToolMessage):
+            continue
+        if not _tool_message_failed(message):
+            break
+        failures += 1
+    return failures
+
+
+def _turn_tool_names(messages: Sequence[Any]) -> list[str]:
+    names: list[str] = []
+    for message in reversed(messages):
+        if isinstance(message, HumanMessage):
+            break
+        if not isinstance(message, AIMessage):
+            continue
+        for call in message.tool_calls:
+            name = call.get("name")
+            if isinstance(name, str):
+                names.append(name)
+    return names
+
+
+def escalation_reason(messages: Sequence[Any]) -> str | None:
+    """Why this turn should leave the cheap route, or None to keep it."""
+    if _consecutive_tool_failures(messages) >= _ESCALATION_FAILURES:
+        return "repeated_tool_failures"
+    names = _turn_tool_names(messages)
+    if len(names) >= _ESCALATION_STEPS and not _EDIT_TOOL_NAMES.intersection(names):
+        return "steps_without_edit"
+    return None
+
+
+def _emit_escalation(reason: str) -> None:
+    try:
+        get_stream_writer()(
+            {"type": "model_route_escalated", "route": "performance", "reason": reason}
+        )
+    except Exception:
+        logger.debug("Failed to emit model_route_escalated", exc_info=True)
+
+
 class RouteDecision(BaseModel):
     model_route: Route
 
@@ -54,6 +126,7 @@ class RouteDecision(BaseModel):
 class ModelSelectionState(AgentState):
     model_route: NotRequired[PersistedRoute]
     plan_mode: NotRequired[bool]
+    model_route_escalated: NotRequired[bool]
 
 
 def normalize_route(route: PersistedRoute) -> Route:
@@ -141,14 +214,25 @@ class ModelSelectionMiddleware(OpenSWEMiddleware[ModelSelectionState]):
         self,
         state: ModelSelectionState,
         runtime: Runtime,
-    ) -> dict[str, Route]:
+    ) -> dict[str, Route | bool]:
         del runtime
         route = await self.select_route(state)
+        escalated = state.get("model_route_escalated") is True
+        if not escalated and not state.get("plan_mode") and route != "performance":
+            reason = escalation_reason(state.get("messages", []))
+            if reason is not None:
+                route = "performance"
+                escalated = True
+                logger.info(
+                    "Escalated model route",
+                    extra={"model_route": route, "model_route_reason": reason},
+                )
+                _emit_escalation(reason)
         if self._routing_mode == "auto":
             await _emit_routed_model(self._models, self._route_model_ids, route)
         if state.get("plan_mode"):
             return {}
-        return {"model_route": route}
+        return {"model_route": route, "model_route_escalated": escalated}
 
     async def awrap_model_call(
         self,

@@ -90,6 +90,7 @@ from agent.mcp.user import user_mcp_source
 from agent.mcp.workspace import workspace_mcp_source
 from agent.middleware import (
     BasePrepareRunMiddleware,
+    DangerousCommandApprovalMiddleware,
     DynamicToolMiddleware,
     ExcludeToolsMiddleware,
     IntegrationGroup,
@@ -110,6 +111,7 @@ from agent.middleware import (
     ValidateImageReadsMiddleware,
     WorkflowPushGuardMiddleware,
     WorkspaceSkillsMiddleware,
+    approval_mode,
     check_message_queue_before_model,
     notify_step_limit_reached,
     record_run_usage,
@@ -159,6 +161,7 @@ from agent.thread_title import TITLE_GENERATION_MAX_TOKENS, schedule_thread_titl
 from agent.threads.summary import thread_is_private
 from agent.tool_loaders.notion_mcp import load_notion_tools
 from agent.tools import (
+    apply_patch,
     approve_plan,
     background_execute,
     background_task,
@@ -259,7 +262,7 @@ DEEP_AGENT_TOOL_NAMES = {
 }
 DEEP_AGENT_EXCLUDED_TOOLS = frozenset({"grep"})
 STOP_SUMMARY_EXCLUDED_TOOLS = DEEP_AGENT_EXCLUDED_TOOLS | frozenset(
-    {"delete", "edit_file", "execute", "task", "write_file"}
+    {"apply_patch", "delete", "edit_file", "execute", "task", "write_file"}
 )
 # A `/oswe` request has a channel but no Slack thread, so only the tools that act
 # on one are out of reach. Everything else, writes included, stays available.
@@ -1254,6 +1257,7 @@ async def get_agent(config: RunnableConfig) -> Pregel:
         background_task,
         enter_plan_mode,
         save_plan,
+        apply_patch,
         save_user_instructions,
         save_user_skill,
         delete_user_skill,
@@ -1423,6 +1427,12 @@ async def get_agent(config: RunnableConfig) -> Pregel:
         else None
     )
     compaction = _compaction_settings(cfg)
+    # The local provider runs commands directly on the host, so destructive
+    # commands get the interactive gate unless the operator chose a mode.
+    configured_approval = ENV.OPEN_SWE_DANGEROUS_COMMAND_APPROVAL.optional()
+    if configured_approval is None and ENV.SANDBOX_TYPE.get() == "local":
+        configured_approval = "interactive"
+    dangerous_approval = approval_mode(configured_approval or "off")
     return create_deep_agent(
         model=main_model,
         system_prompt="",
@@ -1519,6 +1529,7 @@ async def get_agent(config: RunnableConfig) -> Pregel:
                 ),
                 *([] if local_run else [PullRequestCreationGuardMiddleware()]),
                 WorkflowPushGuardMiddleware(),
+                DangerousCommandApprovalMiddleware(mode=dangerous_approval),
                 refresh_github_proxy_before_model,
                 *([] if stop_summary_mode else [check_message_queue_before_model]),
                 TimeoutWrapupMiddleware(),

@@ -434,6 +434,12 @@ ENV.var(
     "API_STANDARDS_SKILL_HANDLE", "Hub handle of the API standards skill.", default="api-standards"
 )
 ENV.var("DEFAULT_PROMPT_PATH", "Path to a default prompt file.")
+ENV.var(
+    "OPEN_SWE_DANGEROUS_COMMAND_APPROVAL",
+    "Gate destructive shell commands on human approval: 'off', 'interactive' "
+    "(dashboard and desktop runs only) or 'always'.",
+    default="off",
+)
 ENV.var("TOOL_LOADER_TIMEOUT_SECONDS", "Timeout for loading optional tool integrations.")
 ENV.var("OPEN_SWE_MODEL_CALL_TIMEOUT_SECONDS", "Cap on a single model call.")
 ENV.var("OPEN_SWE_WRAPUP_TIMEOUT_SECONDS", "Time granted to wrap up after a timeout.")
