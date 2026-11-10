@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.14"
 license = { text = "MIT" }
 dependencies = [
-    "deepagents==0.7.13",
+    "deepagents==0.7.34",
     "fastapi>=0.141.1",
     "uvicorn>=0.52.4",
     "httpx2>=2.12.0,<3.0.0",
@@ -35,16 +35,16 @@ dependencies = [
     "websockets>=16.1.1",
     "slack-sdk>=3.44.1,<4.0.0",
     "aiohttp>=3.14.3,<4.0.0",
-    "alembic==1.20.0",
-    "sqlalchemy[asyncio]==2.0.52",
-    "asyncpg==0.31.0",
+    "alembic==1.20.1",
+    "sqlalchemy[asyncio]==2.1.8",
+    "asyncpg==0.32.0",
     "langgraph-checkpoint-sqlite>=3.1.1",
     "redis>=5.2",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "ty==0.0.78",
+    "ty==0.0.99",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
     "ruff>=0.16.4",
@@ -57,7 +57,7 @@ dev = [
 # `deepagents<0.7.0`, but 0.7.13 keeps the sandbox API backward compatible. Its e2b
 # dependency also caps wcmatch<11.0 while deepagents requires wcmatch>=11.0, so
 # override both transitive bounds until langchain-e2b publishes compatible metadata.
-override-dependencies = ["deepagents==0.7.13", "wcmatch>=11.0"]
+override-dependencies = ["deepagents==0.7.34", "wcmatch>=11.0"]
 # Each langgraph-api release pins its langgraph-runtime-inmem peer to a single
 # minor window expressed in `.dev0` bounds (`>=0.32.0.dev0,<0.33.0.dev0`), which
 # uv's default pre-release policy shies away from, so a plain resolve lands on the
